@@ -1,235 +1,105 @@
 // ==UserScript==
-// @name         Thieme eRef Downloader
-// @version      1.5
+// @name         Thieme PDF Downloader
+// @version      1.6
 // @description  Download all PDFs and merge them into a single file
 // @author       The_Dead_2, Revezd
-// @include      https://eref.thieme.de/ebooks/*
-// @include      */ebooks/*
-// @require      https://cdn.jsdelivr.net/npm/pdf-lib/dist/pdf-lib.min.js
+// @match        https://*.thieme.de/ebooks/*
+// @grant        none
+// @noframes
+// @require      https://cdn.jsdelivr.net/npm/pdf-lib@1.17.1/dist/pdf-lib.min.js
 // @require      https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.min.js
 // ==/UserScript==
 
 (function () {
     'use strict';
 
-    let pdfs = [];
-    let name = document.getElementsByClassName("lineTwo")[0]?.textContent?.trim() + " - " + document.getElementsByClassName("lineOne")[0]?.textContent?.trim()|| "UnkownBook";
-    let indx = 0;
-    let timeout = 60000;
+    const TIMEOUT_MS = 60000;
+    const PDFJS_WORKER_URL = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
+    const CMAP_URL = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@2.16.105/cmaps/';
 
-    pdfjsLib.GlobalWorkerOptions.workerSrc = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/2.16.105/pdf.worker.min.js';
-    console.log("Worker online");
+    pdfjsLib.GlobalWorkerOptions.workerSrc = PDFJS_WORKER_URL;
 
+    let progressEl = null;
+    let busy = false;
+
+    // ---------- Progress UI ----------
 
     function createProgressUI() {
-        removeProgressUI(); 
+        removeProgressUI();
 
-        let progressContainer = document.createElement("div");
-        progressContainer.id = "progressContainer";
-        
-        progressContainer.style.position = "fixed";
-        progressContainer.style.inset = "auto 20px 20px auto"; 
-        progressContainer.style.margin = "0";
+        const el = document.createElement("div");
+        Object.assign(el.style, {
+            position: "fixed",
+            inset: "auto 20px 20px auto",
+            margin: "0",
+            backgroundColor: "rgba(0, 0, 0, 0.85)",
+            color: "#ffffff",
+            padding: "12px 16px",
+            borderRadius: "8px",
+            boxShadow: "0 4px 12px rgba(0,0,0,0.5)",
+            fontFamily: "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif",
+            fontSize: "14px",
+            fontWeight: "bold",
+            zIndex: "2147483647",
+            pointerEvents: "none",
+        });
+        el.innerText = "Downloading...";
 
-        progressContainer.style.backgroundColor = "rgba(0, 0, 0, 0.85)";
-        progressContainer.style.color = "#ffffff";
-        progressContainer.style.padding = "12px 16px";
-        progressContainer.style.borderRadius = "8px";
-        progressContainer.style.boxShadow = "0 4px 12px rgba(0,0,0,0.5)";
-        progressContainer.style.fontFamily = "-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif";
-        progressContainer.style.fontSize = "14px";
-        progressContainer.style.fontWeight = "bold";
-        progressContainer.style.zIndex = "2147483647"; 
-        progressContainer.style.pointerEvents = "none"; 
-        
-        progressContainer.innerText = "Downloading: 0 / 0";
-
-        
         if (HTMLElement.prototype.hasOwnProperty("popover")) {
-            progressContainer.popover = "manual";
-            document.body.appendChild(progressContainer);
-            progressContainer.showPopover();
-        } 
-        else {
-            const t = document.querySelector('t-dialog[dialog-id="pdfDialog"]');
-            const dialogEl = t && t.shadowRoot ? t.shadowRoot.querySelector('dialog') : null;
-            
-            if (dialogEl && dialogEl.hasAttribute('open')) {
-                dialogEl.appendChild(progressContainer);
-            } 
-            else {
-                document.body.appendChild(progressContainer);
-            }
+            el.popover = "manual";
+            document.body.appendChild(el);
+            el.showPopover();
+        } else {
+            const dialogEl = findPdfDialog();
+            (dialogEl && dialogEl.hasAttribute("open") ? dialogEl : document.body).appendChild(el);
         }
+
+        // Keep a direct reference: the element may live inside a shadow root,
+        // where document.getElementById cannot find it.
+        progressEl = el;
     }
 
     function updateProgressUI(text, current, total) {
-        let progressContainer = document.getElementById("progressContainer");
-        if (progressContainer) {
-            progressContainer.innerText = `${text} (${(current / total * 100).toFixed(0)} %)`;
-        }
+        if (!progressEl) return;
+        const percent = total > 0 ? ` (${Math.round(current / total * 100)} %)` : "";
+        progressEl.innerText = text + percent;
     }
 
     function removeProgressUI() {
-        let progressContainer = document.getElementById("progressContainer");
-        if (progressContainer) {
-            progressContainer.remove();
-        }
+        progressEl?.remove();
+        progressEl = null;
     }
 
-    function waitForElement(selector, callback) {
-        const observer = new MutationObserver((mutationsList, observer) => {
-            for (const mutation of mutationsList) {
-                if (mutation.type === "childList") {
-                    const element = document.querySelector(selector);
-                    if (element) {
-                        observer.disconnect();
-                        callback(element);
-                        return;
-                    }
-                }
-            }
-        });
-
-        observer.observe(document.body, { childList: true, subtree: true });
-    }
-
-    function hashString(string) {
-        let hash = 0;
-        for (let i = 0; i < string.length; i++) {
-            const char = string.charCodeAt(i);
-            hash = (hash << 5) - hash + char;
-            hash |= 0; // Convert to 32bit integer
-        }
-        return hash;
-    }
+    // ---------- Helpers ----------
 
     function truncateString(str, num) {
-    if (str.length > num) {
-        return str.slice(0, num) + "...";
-    } else {
-        return str;
-    }
-}
-
-    async function extractTextFromPDF(arrayBuffer) {
-        const CMAP_URL = 'https://cdn.jsdelivr.net/npm/pdfjs-dist@2.16.105/cmaps/';
-
-        const loadingTask = pdfjsLib.getDocument({ 
-            data: arrayBuffer,
-            cMapUrl: CMAP_URL,
-            cMapPacked: true,
-            disableFontFace: true 
-        });
-        
-        const pdf = await loadingTask.promise;
-        const textContents = [];
-
-        for (let pageIndex = 1; pageIndex <= pdf.numPages; pageIndex++) {
-            try {
-                const page = await pdf.getPage(pageIndex);
-                const textContent = await page.getTextContent();
-                const pageText = textContent.items.map((item) => item.str).join(" ");
-                textContents.push(pageText);
-                
-                page.cleanup();
-            } catch (e) {
-                console.warn(`Warning: Could not extract text for page ${pageIndex}. Skipping deduplication for this page.`, e);
-                textContents.push(`Fallback_Page_${pageIndex}_${Math.random()}`); 
-            }
-        }
-
-        await loadingTask.destroy();
-
-        return textContents;
+        return str.length > num ? str.slice(0, num) + "..." : str;
     }
 
-    async function downloadAndMergePDFs(files) {
-        if (files.length === 0) {
-            alert("Couldn't find any pdfs to download!");
-            return;
-        }
-
-        updateProgressUI("Starting process...", 0, files.length);
-
-        try {
-            const mergedPdf = await PDFLib.PDFDocument.create();
-            const uniquePages = new Set();
-            let processedCount = 0;
-
-            for (const file of files) {
-                const shortName = truncateString(file.filename, 30);
-                updateProgressUI(`Processing: ${shortName}`, processedCount + 1, files.length);
-
-                let pdfBlob = await downloadPDF(file);
-                let pdfArrayBuffer = await pdfBlob.arrayBuffer();
-
-                const textContents = await extractTextFromPDF(pdfArrayBuffer);
-
-                let pdfDoc = await PDFLib.PDFDocument.load(pdfArrayBuffer);
-                for (let i = 0; i < textContents.length; i++) {
-                    const pageHash = hashString(textContents[i]);
-
-                    if (!uniquePages.has(pageHash)) {
-                        uniquePages.add(pageHash);
-                        const [copiedPage] = await mergedPdf.copyPages(pdfDoc, [i]);
-                        mergedPdf.addPage(copiedPage);
-                    }
-                }
-
-                pdfDoc = null;
-                pdfArrayBuffer = null;
-                pdfBlob = null;
-
-                await new Promise(resolve => setTimeout(resolve, 150));
-                
-                processedCount++;
-            }
-
-            updateProgressUI("Generating final PDF... (This may take a moment)", processedCount, files.length);
-
-            const mergedPdfBytes = await mergedPdf.save({ useObjectStreams: false });
-            const mergedBlob = new Blob([mergedPdfBytes], { type: "application/pdf" });
-            
-            const downloadUrl = URL.createObjectURL(mergedBlob);
-            const a = document.createElement("a");
-            a.href = downloadUrl;
-            a.download = `${name}.pdf`;
-            document.body.appendChild(a);
-            a.click();
-            
-            URL.revokeObjectURL(downloadUrl);
-            a.remove();
-
-            updateProgressUI("Download complete!", processedCount, files.length);
-            await new Promise(resolve => setTimeout(resolve, 5000));
-
-        } 
-        catch (error) {
-            alert("An error occurred while downloading:\n" + error.message);
-            console.error("Error detailing:", error);
-        } 
-        finally {
-            removeProgressUI();
-        }
-    }
-
-    async function downloadPDF(file) {
-        const downloadPromise = fetch(file.download).then((response) => {
-            if (!response.ok) throw new Error(`Error fetching: ${file.filename}`);
-            return response.blob();
-        });
-
-        const timeoutPromise = new Promise((_, reject) =>
-            setTimeout(() => reject(new Error(`Network Timeout for: ${file.filename}`)), timeout)
-        );
-
-        return await Promise.race([downloadPromise, timeoutPromise]);
+    function getBookName() {
+        const lineOne = document.querySelector(".lineOne")?.textContent?.trim();
+        const lineTwo = document.querySelector(".lineTwo")?.textContent?.trim();
+        const name = [lineTwo, lineOne].filter(Boolean).join(" - ") || "UnknownBook";
+        return name.replace(/[\\/:*?"<>|\u0000-\u001f]/g, "_");
     }
 
     function getBaseUrl() {
-        let url = String(window.location);
+        const url = String(window.location);
         return url.substring(0, url.indexOf("/ebooks"));
+    }
+
+    // Resolve a pdf-link attribute to an absolute URL and only accept
+    // PDF files on the same origin as the current page.
+    function resolvePdfUrl(link) {
+        if (!link) return null;
+        try {
+            const url = link.startsWith("/") ? new URL(getBaseUrl() + link) : new URL(link, location.href);
+            if (url.origin !== location.origin) return null;
+            if (!url.pathname.toLowerCase().endsWith(".pdf")) return null;
+            return url.href;
+        } catch {
+            return null;
+        }
     }
 
     function findAllInShadow(root, selector) {
@@ -242,50 +112,172 @@
         return results;
     }
 
-    function downloadAllPdfs() {
-        console.log("clicked");
-        let indx = 0;
-        let pdfs = [];
+    function findPdfDialog() {
+        const t = document.querySelector('t-dialog[dialog-id="pdfDialog"]');
+        return t?.shadowRoot?.querySelector("dialog") ?? null;
+    }
 
-        const elements = findAllInShadow(document, 't-toc-entry');
-        elements.forEach(el => {
-            const pdfLink = el.getAttribute("pdf-link");
-            const title = el.getAttribute("title");
-            if (pdfLink && pdfLink.includes(".pdf")) {
-                indx++;
-                pdfs.push({
-                    download: getBaseUrl() + pdfLink,
-                    filename: indx.toString().padStart(3, "0") + "_" + title + ".pdf"
-                });
-            }
+    async function sha256Hex(text) {
+        const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(text));
+        return Array.from(new Uint8Array(digest), b => b.toString(16).padStart(2, "0")).join("");
+    }
+
+    // ---------- PDF processing ----------
+
+    // Returns the normalized text of every page. Pages whose text could not be
+    // extracted are returned as null, so they are always kept.
+    async function extractTextFromPDF(arrayBuffer) {
+        const loadingTask = pdfjsLib.getDocument({
+            data: arrayBuffer.slice(0), // pdf.js may take ownership of the buffer, so give it a copy
+            cMapUrl: CMAP_URL,
+            cMapPacked: true,
+            disableFontFace: true,
+            isEvalSupported: false, // hardening against CVE-2024-4367
         });
 
-        console.log(pdfs);
+        const pdf = await loadingTask.promise;
+        const textContents = [];
 
-        if (pdfs.length > 0) {
-            createProgressUI();
-            updateProgressUI("Downloading", 0, pdfs.length);
-            downloadAndMergePDFs(pdfs);
-        } 
-        else {
-            alert("Couldn't find any pdfs to download!");
+        for (let pageIndex = 1; pageIndex <= pdf.numPages; pageIndex++) {
+            try {
+                const page = await pdf.getPage(pageIndex);
+                const textContent = await page.getTextContent();
+                const pageText = textContent.items.map(item => item.str).join(" ").replace(/\s+/g, " ").trim();
+                textContents.push(pageText);
+                page.cleanup();
+            } catch (e) {
+                console.warn(`Could not extract text for page ${pageIndex}; keeping it.`, e);
+                textContents.push(null);
+            }
+        }
+
+        await loadingTask.destroy();
+        return textContents;
+    }
+
+    async function downloadPDF(file) {
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
+        try {
+            const response = await fetch(file.download, { signal: controller.signal, credentials: "same-origin" });
+            if (!response.ok) throw new Error(`Error fetching: ${file.filename} (HTTP ${response.status})`);
+            return await response.arrayBuffer();
+        } catch (e) {
+            if (e.name === "AbortError") throw new Error(`Network timeout for: ${file.filename}`);
+            throw e;
+        } finally {
+            clearTimeout(timer);
         }
     }
 
+    async function downloadAndMergePDFs(files) {
+        const bookName = getBookName();
+        updateProgressUI("Starting process...", 0, files.length);
 
-    function createFloatingButton() {
-        const existing = document.getElementById('pdf-download-all-btn');
-        if (existing) existing.remove();
+        try {
+            const mergedPdf = await PDFLib.PDFDocument.create();
+            // Chapter PDFs overlap at their boundaries (the last page of one chapter
+            // is often the first page of the next). Only compare against the
+            // previous file so identical-looking pages elsewhere in the book survive.
+            let previousHashes = new Set();
+            let processedCount = 0;
 
+            for (const file of files) {
+                updateProgressUI(`Processing: ${truncateString(file.filename, 30)}`, processedCount + 1, files.length);
+
+                const pdfArrayBuffer = await downloadPDF(file);
+                const textContents = await extractTextFromPDF(pdfArrayBuffer);
+                const pdfDoc = await PDFLib.PDFDocument.load(pdfArrayBuffer, { ignoreEncryption: true });
+
+                const currentHashes = new Set();
+                const pagesToCopy = [];
+                for (let i = 0; i < pdfDoc.getPageCount(); i++) {
+                    const text = textContents[i];
+                    // Blank / image-only pages (no text) are always kept.
+                    if (text) {
+                        const hash = await sha256Hex(text);
+                        currentHashes.add(hash);
+                        if (previousHashes.has(hash)) continue;
+                    }
+                    pagesToCopy.push(i);
+                }
+
+                const copiedPages = await mergedPdf.copyPages(pdfDoc, pagesToCopy);
+                copiedPages.forEach(page => mergedPdf.addPage(page));
+
+                previousHashes = currentHashes;
+                processedCount++;
+
+                await new Promise(resolve => setTimeout(resolve, 150));
+            }
+
+            updateProgressUI("Generating final PDF... (This may take a moment)", processedCount, files.length);
+
+            const mergedPdfBytes = await mergedPdf.save({ useObjectStreams: false });
+            const mergedBlob = new Blob([mergedPdfBytes], { type: "application/pdf" });
+
+            const downloadUrl = URL.createObjectURL(mergedBlob);
+            const a = document.createElement("a");
+            a.href = downloadUrl;
+            a.download = `${bookName}.pdf`;
+            document.body.appendChild(a);
+            a.click();
+            a.remove();
+            // Revoking immediately can cancel the download in some browsers.
+            setTimeout(() => URL.revokeObjectURL(downloadUrl), 60000);
+
+            updateProgressUI("Download complete!", processedCount, files.length);
+            await new Promise(resolve => setTimeout(resolve, 5000));
+        } catch (error) {
+            alert("An error occurred while downloading:\n" + error.message);
+            console.error("Error details:", error);
+        } finally {
+            removeProgressUI();
+        }
+    }
+
+    async function downloadAllPdfs() {
+        if (busy) return;
+
+        const pdfs = [];
+        findAllInShadow(document, "t-toc-entry").forEach(el => {
+            const url = resolvePdfUrl(el.getAttribute("pdf-link"));
+            if (!url) return;
+            const title = el.getAttribute("title") || "Untitled";
+            pdfs.push({
+                download: url,
+                filename: String(pdfs.length + 1).padStart(3, "0") + "_" + title + ".pdf",
+            });
+        });
+
+        if (pdfs.length === 0) {
+            alert("Couldn't find any pdfs to download!");
+            return;
+        }
+
+        busy = true;
+        setButtonBusy(true);
+        try {
+            createProgressUI();
+            await downloadAndMergePDFs(pdfs);
+        } finally {
+            busy = false;
+            setButtonBusy(false);
+        }
+    }
+
+    // ---------- Button ----------
+
+    function createButtonHost() {
         const host = document.createElement('div');
         host.id = 'pdf-download-all-btn';
         host.style.cssText = `
-        all: initial !important;
-        position: absolute !important;
-        top: 12px !important;
-        right: 66px !important;
-        z-index: 999999 !important;
-    `;
+            all: initial !important;
+            position: absolute !important;
+            top: 12px !important;
+            right: 66px !important;
+            z-index: 999999 !important;
+        `;
 
         const shadow = host.attachShadow({ mode: 'open' });
         shadow.innerHTML = `
@@ -306,22 +298,11 @@
                 cursor: pointer;
                 transition: background 0.15s ease, transform 0.1s ease;
             }
-            button:hover {
-                background: #1d4ed8;
-            }
-            button:active {
-                background: #1e40af;
-                transform: scale(0.97);
-            }
-            button:focus-visible {
-                outline: 2px solid #93c5fd;
-                outline-offset: 2px;
-            }
-            svg {
-                width: 16px;
-                height: 16px;
-                flex-shrink: 0;
-            }
+            button:hover { background: #1d4ed8; }
+            button:active { background: #1e40af; transform: scale(0.97); }
+            button:disabled { background: #64748b; cursor: progress; transform: none; }
+            button:focus-visible { outline: 2px solid #93c5fd; outline-offset: 2px; }
+            svg { width: 16px; height: 16px; flex-shrink: 0; }
         </style>
         <button type="button">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -331,49 +312,46 @@
             </svg>
             <span>Download all</span>
         </button>
-    `;
+        `;
 
         shadow.querySelector('button').addEventListener('click', downloadAllPdfs);
-
-        attachDialogWatcher(host);
-
         return host;
     }
 
-    function attachDialogWatcher(host) {
-        const t = document.querySelector('t-dialog[dialog-id="pdfDialog"]');
-        if (!t || !t.shadowRoot) {
-            setTimeout(() => attachDialogWatcher(host), 500);
-            return;
-        }
-        const dialogEl = t.shadowRoot.querySelector('dialog');
-        if (!dialogEl) {
-            setTimeout(() => attachDialogWatcher(host), 500);
-            return;
-        }
+    const btnHost = createButtonHost();
+    const btn = btnHost.shadowRoot.querySelector('button');
+    const btnLabel = btnHost.shadowRoot.querySelector('span');
 
-        const sync = () => {
-            if (!dialogEl.contains(host)) {
-                dialogEl.appendChild(host);
-            }
-            host.style.display = dialogEl.hasAttribute('open') ? 'block' : 'none';
-        };
-
-        const attrObserver = new MutationObserver(sync);
-        attrObserver.observe(dialogEl, { attributes: true, attributeFilter: ['open'] });
-
-        const contentObserver = new MutationObserver(sync);
-        contentObserver.observe(dialogEl, { childList: true });
-
-        sync();
+    function setButtonBusy(isBusy) {
+        btn.disabled = isBusy;
+        btnLabel.textContent = isBusy ? "Downloading..." : "Download all";
     }
 
-    let btnHost = createFloatingButton();
+    let observedDialog = null;
+    let dialogObserver = null;
 
-    const watchdog = new MutationObserver(() => {
-        if (!document.getElementById('pdf-download-all-btn')) {
-            btnHost = createFloatingButton();
+    function syncButton() {
+        if (!observedDialog) return;
+        if (!observedDialog.contains(btnHost)) {
+            observedDialog.appendChild(btnHost);
         }
-    });
-    watchdog.observe(document.body, { childList: true, subtree: true });
+        btnHost.style.setProperty('display', observedDialog.hasAttribute('open') ? 'block' : 'none', 'important');
+    }
+
+    // The dialog lives in a shadow root and may be (re)created by the site at
+    // any time, so check for it periodically and re-attach to a new instance.
+    function attachToDialog() {
+        const dialogEl = findPdfDialog();
+        if (!dialogEl) return;
+        if (dialogEl !== observedDialog) {
+            dialogObserver?.disconnect();
+            observedDialog = dialogEl;
+            dialogObserver = new MutationObserver(syncButton);
+            dialogObserver.observe(dialogEl, { attributes: true, attributeFilter: ['open'], childList: true });
+        }
+        syncButton();
+    }
+
+    attachToDialog();
+    setInterval(attachToDialog, 1000);
 })();

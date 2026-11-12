@@ -1,8 +1,8 @@
-# Thieme eRef Downloader
+# Thieme PDF Downloader
 
-Downloading a complete e-book from the Thieme eRef is an incredibly tedious and time-consuming task. You have to go through every single subchapter of the book you want and manually download them one by one. Then you have to merge all the downloaded PDFs and remove pages that appear more than once.
+Downloading a complete e-book from the Thieme is an incredibly tedious and time-consuming task. You have to go through every single subchapter of the book you want and manually download them one by one. Then you have to merge all the downloaded PDFs and remove pages that appear more than once.
 
-This Thieme eRef Downloader does all that for you in a fraction of the time, with just the click of a button. 
+This Thieme PDF Downloader does all that for you in a fraction of the time, with just the click of a button. 
 
 ## How to use it?
 1. You need valid authentication to access the books in Thieme eRef (e.g. through your institution or an active subscription).
@@ -22,7 +22,7 @@ This Thieme eRef Downloader does all that for you in a fraction of the time, wit
 > Depending on the size of the e-book downloading and merging the files may take a few minutes!
 
 > [!NOTE]
-> You might find that there are missing pages in the final pdf. These missing pages are generally completely white pages without any content. This is due to the way the script compares the content of pdf pages and can not be avoided but as these pages have no content this is no problem!
+> Pages that appear in two consecutive chapter PDFs (e.g. a chapter's last page that is also the next chapter's first page) are only included once. Duplicates are detected by comparing the text of a page with the pages of the previous chapter. Blank and image-only pages are always kept, so you may occasionally see a duplicated blank page.
 
 > [!CAUTION]
 > Use at your own risk. This project is for educational purposes only. I am not responsible for any misuse of the software. Depending on your jurisdiction, it may be illegal to use this software to download the e-books in their entirety without the publisher's permission. In other jurisdictions, it may be legal to download e-books for personal use only. Please check your local laws before using this software.
